@@ -514,6 +514,31 @@ class SparkConfSuite extends SparkFunSuite with LocalSparkContext with ResetSyst
       conf.validateSettings()
     }
   }
+
+  test("SPARK-33292: Dynamically sets the number of push threads") {
+    val conf = new SparkConf(loadDefaults = false)
+    conf.set("spark.shuffle.push.dynamicThreads.enabled", "true")
+    conf.set("spark.shuffle.push.minThreads", "2")
+    conf.set("spark.shuffle.push.maxThreads", "10")
+    conf.set("spark.shuffle.push.threadsPerCore", "2.5")
+    conf.set("spark.executor.cores", "4")
+
+    val pusher = org.apache.spark.shuffle.ShuffleBlockPusher
+    val method = pusher.getClass.getDeclaredMethod("calculateNumThreads",
+      classOf[SparkConf])
+    method.setAccessible(true)
+    val numThreads = method.invoke(pusher, conf).asInstanceOf[Int]
+    assert(numThreads == 10)
+
+    conf.set("spark.executor.cores", "1")
+    val numThreads2 = method.invoke(pusher, conf).asInstanceOf[Int]
+    assert(numThreads2 == 3)
+
+    conf.set("spark.shuffle.push.dynamicThreads.enabled", "false")
+    conf.set("spark.shuffle.push.numPushThreads", "5")
+    val numThreads3 = method.invoke(pusher, conf).asInstanceOf[Int]
+    assert(numThreads3 == 5)
+  }
 }
 
 class Class1 {}

@@ -499,12 +499,25 @@ private[spark] object ShuffleBlockPusher {
    */
   private case class PushResult(blockId: String, failure: Throwable)
 
+  private def calculateNumThreads(conf: SparkConf): Int = {
+    if (conf.get(SHUFFLE_PUSH_DYNAMIC_THREADS_ENABLED)) {
+      val minThreads = conf.get(SHUFFLE_PUSH_MIN_THREADS)
+      val maxThreads = conf.get(SHUFFLE_PUSH_MAX_THREADS)
+      val threadsPerCore = conf.get(SHUFFLE_PUSH_THREADS_PER_CORE)
+      val numCores = conf.getInt(SparkLauncher.EXECUTOR_CORES, 1)
+      val calculatedThreads = (numCores * threadsPerCore).ceil.toInt
+      math.max(minThreads, math.min(maxThreads, calculatedThreads))
+    } else {
+      conf.get(SHUFFLE_NUM_PUSH_THREADS)
+        .getOrElse(conf.getInt(SparkLauncher.EXECUTOR_CORES, 1))
+    }
+  }
+
   private val BLOCK_PUSHER_POOL: ExecutorService = {
     val conf = SparkEnv.get.conf
     if (Utils.isPushBasedShuffleEnabled(conf,
         isDriver = SparkContext.DRIVER_IDENTIFIER == SparkEnv.get.executorId)) {
-      val numThreads = conf.get(SHUFFLE_NUM_PUSH_THREADS)
-        .getOrElse(conf.getInt(SparkLauncher.EXECUTOR_CORES, 1))
+      val numThreads = calculateNumThreads(conf)
       ThreadUtils.newDaemonFixedThreadPool(numThreads, "shuffle-block-push-thread")
     } else {
       null
