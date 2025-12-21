@@ -211,6 +211,4 @@ if __name__ == "__main__":
     (sock_file, sock) = local_connect_and_auth(conn_info, auth_secret)
     # Prevent the socket from timeout error when query trigger interval is large.
     sock.settimeout(None)
-    write_int(os.getpid(), sock_file)
-    sock_file.flush()
     main(sock_file, sock_file)
