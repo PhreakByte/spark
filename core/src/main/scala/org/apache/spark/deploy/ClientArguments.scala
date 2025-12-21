@@ -42,6 +42,7 @@ private[deploy] class ClientArguments(args: Array[String]) {
   var supervise: Boolean = DEFAULT_SUPERVISE
   var memory: Int = DEFAULT_MEMORY
   var cores: Int = DEFAULT_CORES
+  var jars: String = ""
   private val _driverOptions = ListBuffer[String]()
   def driverOptions: Seq[String] = _driverOptions.toSeq
 
@@ -58,6 +59,10 @@ private[deploy] class ClientArguments(args: Array[String]) {
 
     case ("--memory" | "-m") :: MemoryParam(value) :: tail =>
       memory = value
+      parse(tail)
+
+    case ("--jars") :: value :: tail =>
+      jars = value
       parse(tail)
 
     case ("--supervise" | "-s") :: tail =>
@@ -101,8 +106,6 @@ private[deploy] class ClientArguments(args: Array[String]) {
    * Print usage and exit JVM with the given exit code.
    */
   private def printUsageAndExit(exitCode: Int): Unit = {
-    // TODO: It wouldn't be too hard to allow users to submit their app and dependency jars
-    //       separately similar to in the YARN client.
     val usage =
      s"""
       |Usage: DriverClient [options] launch <active-master> <jar-url> <main-class> [driver options]
@@ -111,6 +114,8 @@ private[deploy] class ClientArguments(args: Array[String]) {
       |Options:
       |   -c CORES, --cores CORES        Number of cores to request (default: $DEFAULT_CORES)
       |   -m MEMORY, --memory MEMORY     Megabytes of memory to request (default: $DEFAULT_MEMORY)
+      |   --jars JARS                    Comma-separated list of jars to include on the driver
+      |                                  and executor classpaths
       |   -s, --supervise                Whether to restart the driver on failure
       |                                  (default: $DEFAULT_SUPERVISE)
       |   -v, --verbose                  Print more debugging output

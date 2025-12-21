@@ -282,6 +282,10 @@ private[spark] class ClientApp extends SparkApplication {
   override def start(args: Array[String], conf: SparkConf): Unit = {
     val driverArgs = new ClientArguments(args)
 
+    if (driverArgs.jars != null && driverArgs.jars.nonEmpty) {
+      conf.setIfMissing("spark.jars", driverArgs.jars)
+    }
+
     if (!conf.contains(RPC_ASK_TIMEOUT)) {
       conf.set(RPC_ASK_TIMEOUT, "10s")
     }
