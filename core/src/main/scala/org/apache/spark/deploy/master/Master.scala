@@ -420,9 +420,6 @@ private[deploy] class Master(
         drivers.add(driver)
         schedule()
 
-        // TODO: It might be good to instead have the submission client poll the master to determine
-        //       the current status of the driver. For now it's simply "fire and forget".
-
         context.reply(SubmitDriverResponse(self, true, Some(driver.id),
           s"Driver successfully submitted as ${driver.id}"))
       }

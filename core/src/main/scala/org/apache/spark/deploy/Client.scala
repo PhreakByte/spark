@@ -65,12 +65,17 @@ private class ClientEndpoint(
           System.exit(SparkExitCode.UNCAUGHT_EXCEPTION)
       })
 
+  // Exposed for testing
+  private[deploy] def exit(code: Int): Unit = {
+    System.exit(code)
+  }
+
    private val lostMasters = new HashSet[RpcAddress]
    private var activeMasterEndpoint: RpcEndpointRef = null
    private val waitAppCompletion = conf.get(config.STANDALONE_SUBMIT_WAIT_APP_COMPLETION)
    private val REPORT_DRIVER_STATUS_INTERVAL = 10000
    private var submittedDriverID = ""
-   private var driverStatusReported = false
+   private var lastState: Option[DriverState] = None
 
 
   private def getProperty(key: String, conf: SparkConf): Option[String] = {
@@ -160,12 +165,10 @@ private class ClientEndpoint(
       workerHostPort: Option[String],
       exception: Option[Exception]): Unit = {
     if (found) {
-      // Using driverStatusReported to avoid writing following
-      // logs again when waitAppCompletion is set to true
-      if (!driverStatusReported) {
-        driverStatusReported = true
+      if (!lastState.contains(state.get)) {
         logInfo(log"State of ${MDC(DRIVER_ID, submittedDriverID)}" +
           log" is ${MDC(DRIVER_STATE, state.get)}")
+        lastState = state
         // Worker node, if present
         (workerId, workerHostPort, state) match {
           case (Some(id), Some(hostPort), Some(DriverState.RUNNING)) =>
@@ -177,31 +180,35 @@ private class ClientEndpoint(
       exception match {
         case Some(e) =>
           logError("Exception from cluster", e)
-          System.exit(-1)
+          exit(-1)
         case _ =>
           state.get match {
             case DriverState.FINISHED | DriverState.FAILED |
                  DriverState.ERROR | DriverState.KILLED =>
               logInfo(log"State of driver ${MDC(DRIVER_ID, submittedDriverID)}" +
                 log" is ${MDC(DRIVER_STATE, state.get)}, exiting spark-submit JVM.")
-              System.exit(0)
-            case _ =>
+              exit(0)
+            case DriverState.RUNNING =>
               if (!waitAppCompletion) {
                 logInfo("spark-submit not configured to wait for completion, " +
                   " exiting spark-submit JVM.")
-                System.exit(0)
+                exit(0)
               } else {
                 logDebug(log"State of driver ${MDC(DRIVER_ID, submittedDriverID)}" +
                   log" is ${MDC(DRIVER_STATE, state.get)}, " +
                   log"continue monitoring driver status.")
               }
+            case _ =>
+              logDebug(log"State of driver ${MDC(DRIVER_ID, submittedDriverID)}" +
+                log" is ${MDC(DRIVER_STATE, state.get)}, " +
+                log"continue monitoring driver status.")
           }
       }
     } else if (exception.exists(e => Utils.responseFromBackup(e.getMessage))) {
       logDebug(s"The status response is reported from a backup spark instance. So, ignored.")
     } else {
         logError(log"ERROR: Cluster master did not recognize ${MDC(DRIVER_ID, submittedDriverID)}")
-        System.exit(-1)
+        exit(-1)
     }
   }
   override def receive: PartialFunction[Any, Unit] = {
@@ -212,7 +219,7 @@ private class ClientEndpoint(
         activeMasterEndpoint = master
         submittedDriverID = driverId.get
       } else if (!Utils.responseFromBackup(message)) {
-        System.exit(-1)
+        exit(-1)
       }
 
     case KillDriverResponse(master, driverId, success, message) =>
@@ -220,7 +227,7 @@ private class ClientEndpoint(
       if (success) {
         activeMasterEndpoint = master
       } else if (!Utils.responseFromBackup(message)) {
-        System.exit(-1)
+        exit(-1)
       }
 
     case DriverStatusResponse(found, state, workerId, workerHostPort, exception) =>
@@ -236,7 +243,7 @@ private class ClientEndpoint(
       // is not currently a concern, however, because this client does not retry submissions.
       if (lostMasters.size >= masterEndpoints.size) {
         logError("No master is available, exiting.")
-        System.exit(-1)
+        exit(-1)
       }
     }
   }
@@ -247,14 +254,14 @@ private class ClientEndpoint(
       lostMasters += remoteAddress
       if (lostMasters.size >= masterEndpoints.size) {
         logError("No master is available, exiting.")
-        System.exit(-1)
+        exit(-1)
       }
     }
   }
 
   override def onError(cause: Throwable): Unit = {
     logError("Error processing messages, exiting.", cause)
-    System.exit(-1)
+    exit(-1)
   }
 
   override def onStop(): Unit = {
