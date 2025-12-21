@@ -1608,7 +1608,7 @@ private[spark] object Utils
     } finally {
       stream.close()
     }
-    Source.fromBytes(buff).mkString
+    new String(buff, StandardCharsets.UTF_8)
   }
 
   /**
