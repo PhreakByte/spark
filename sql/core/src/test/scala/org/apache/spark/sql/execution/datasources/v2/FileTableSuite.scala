@@ -137,4 +137,27 @@ class FileTableSuite extends QueryTest with SharedSparkSession {
       }
     }
   }
+
+  test("SPARK-36340: Unify check schema field of DataSource V2 Insert") {
+    withSQLConf(SQLConf.USE_V1_SOURCE_LIST.key -> "") {
+      withTempDir { dir =>
+        val path = dir.getCanonicalPath
+
+        // Attempt to write unsupported data type (ArrayType) to CSV
+        // Using DataFrameWriter which uses FileTable/FileWrite because we disabled V1 source list
+        // CSV does not support ArrayType
+        val e = intercept[org.apache.spark.sql.AnalysisException] {
+          spark.range(1)
+            .selectExpr("array(1, 2) as a")
+            .write
+            .format("csv")
+            .mode("overwrite")
+            .save(path)
+        }
+
+        assert(e.getMessage.contains(
+          "The CSV datasource doesn't support the column `a` of the type \"ARRAY<INT>\""))
+      }
+    }
+  }
 }

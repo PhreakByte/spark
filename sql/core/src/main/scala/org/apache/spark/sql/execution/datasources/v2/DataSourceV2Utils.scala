@@ -32,13 +32,13 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.catalog.{CatalogV2Util, SessionConfigSupport, StagedTable, StagingTableCatalog, SupportsCatalogOptions, SupportsRead, Table, TableProvider}
 import org.apache.spark.sql.connector.catalog.TableCapability.BATCH_READ
-import org.apache.spark.sql.errors.QueryExecutionErrors
+import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.types.{DataType, LongType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 private[sql] object DataSourceV2Utils extends Logging {
@@ -211,5 +211,16 @@ private[sql] object DataSourceV2Utils extends Logging {
     tableCatalog.supportedCustomMetrics().map {
       metric => metric.name() -> SQLMetrics.createV2CustomMetric(sparkContext, metric)
     }.toMap
+  }
+
+  def validateSchema(
+      schema: StructType,
+      supportsDataType: DataType => Boolean,
+      formatName: String): Unit = {
+    schema.foreach { field =>
+      if (!supportsDataType(field.dataType)) {
+        throw QueryCompilationErrors.dataTypeUnsupportedByDataSourceError(formatName, field)
+      }
+    }
   }
 }

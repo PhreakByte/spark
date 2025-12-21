@@ -83,11 +83,7 @@ abstract class FileTable(
   override lazy val schema: StructType = {
     val caseSensitive = sparkSession.sessionState.conf.caseSensitiveAnalysis
     SchemaUtils.checkSchemaColumnNameDuplication(dataSchema, caseSensitive)
-    dataSchema.foreach { field =>
-      if (!supportsDataType(field.dataType)) {
-        throw QueryCompilationErrors.dataTypeUnsupportedByDataSourceError(formatName, field)
-      }
-    }
+    DataSourceV2Utils.validateSchema(dataSchema, supportsDataType, formatName)
     val partitionSchema = fileIndex.partitionSchema
     SchemaUtils.checkSchemaColumnNameDuplication(partitionSchema, caseSensitive)
     val partitionNameSet: Set[String] =
