@@ -470,7 +470,7 @@ public class RemoteBlockPushResolverSuite {
     IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
       () -> pushResolver.getMergedBlockDirs(testApp));
     assertEquals(e.getMessage(),
-      "application " + testApp + " is not registered or NM was restarted.");
+      "application " + testApp + " is not registered.");
   }
 
   @Test
@@ -516,7 +516,7 @@ public class RemoteBlockPushResolverSuite {
     IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
       () -> pushResolver.getMergedBlockDirs(testApp));
     assertEquals(e.getMessage(),
-      "application " + testApp + " is not registered or NM was restarted.");
+      "application " + testApp + " is not registered.");
   }
 
   @Test
