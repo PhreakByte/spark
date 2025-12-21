@@ -211,10 +211,9 @@ public class RemoteBlockPushResolver implements MergedShuffleFileManager {
 
   @VisibleForTesting
   protected AppShuffleInfo validateAndGetAppShuffleInfo(String appId) {
-    // TODO: [SPARK-33236] Change the message when this service is able to handle NM restart
     AppShuffleInfo appShuffleInfo = appsShuffleInfo.get(appId);
     JavaUtils.checkArgument(appShuffleInfo != null,
-      "application " + appId + " is not registered or NM was restarted.");
+      "application " + appId + " is not registered.");
     return appShuffleInfo;
   }
 
