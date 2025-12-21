@@ -31,7 +31,6 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateTimeUtils}
 import org.apache.spark.sql.connector.write.{BatchWrite, LogicalWriteInfo, Write}
-import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, DataSource, OutputWriterFactory, WriteJobDescription}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.internal.SQLConf
@@ -98,12 +97,7 @@ trait FileWrite extends Write {
     }
     DataSource.validateSchema(formatName, schema, sqlConf)
 
-    // TODO: [SPARK-36340] Unify check schema filed of DataSource V2 Insert.
-    schema.foreach { field =>
-      if (!supportsDataType(field.dataType)) {
-        throw QueryCompilationErrors.dataTypeUnsupportedByDataSourceError(formatName, field)
-      }
-    }
+    DataSourceV2Utils.validateSchema(schema, supportsDataType, formatName)
   }
 
   private def getJobInstance(hadoopConf: Configuration, path: Path): Job = {
