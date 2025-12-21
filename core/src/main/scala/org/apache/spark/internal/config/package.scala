@@ -2659,6 +2659,40 @@ package object config {
       .intConf
       .createOptional
 
+  private[spark] val SHUFFLE_PUSH_DYNAMIC_THREADS_ENABLED =
+    ConfigBuilder("spark.shuffle.push.dynamicThreads.enabled")
+      .doc("When true, the number of threads in the block pusher pool is dynamically " +
+        "adjusted based on the number of shuffle blocks. When false, the number of " +
+        "threads is fixed to spark.shuffle.push.numPushThreads or the number of executor cores.")
+      .version("4.1.0")
+      .booleanConf
+      .createWithDefault(false)
+
+  private[spark] val SHUFFLE_PUSH_MIN_THREADS =
+    ConfigBuilder("spark.shuffle.push.minThreads")
+      .doc("When spark.shuffle.push.dynamicThreads.enabled is true, this is the minimum " +
+        "number of threads in the block pusher pool.")
+      .version("4.1.0")
+      .intConf
+      .createWithDefault(1)
+
+  private[spark] val SHUFFLE_PUSH_MAX_THREADS =
+    ConfigBuilder("spark.shuffle.push.maxThreads")
+      .doc("When spark.shuffle.push.dynamicThreads.enabled is true, this is the maximum " +
+        "number of threads in the block pusher pool.")
+      .version("4.1.0")
+      .intConf
+      .createWithDefault(16)
+
+  private[spark] val SHUFFLE_PUSH_THREADS_PER_CORE =
+    ConfigBuilder("spark.shuffle.push.threadsPerCore")
+      .doc("When spark.shuffle.push.dynamicThreads.enabled is true, this is the number of " +
+        "threads per core to use for the block pusher pool. The total number of threads will be " +
+        "this value multiplied by the number of executor cores, clamped to the min/max values.")
+      .version("4.1.0")
+      .doubleConf
+      .createWithDefault(2.0)
+
   private[spark] val SHUFFLE_MAX_BLOCK_SIZE_TO_PUSH =
     ConfigBuilder("spark.shuffle.push.maxBlockSizeToPush")
       .doc("The max size of an individual block to push to the remote external shuffle services." +
