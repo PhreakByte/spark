@@ -136,6 +136,8 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
     val leftTargetSize = targetSize(leftSizes, leftSkewThreshold)
     val rightTargetSize = targetSize(rightSizes, rightSkewThreshold)
 
+    val maxSplits = conf.getConf(SQLConf.SKEW_JOIN_MAX_SPLITS_PER_PARTITION)
+
     val leftSidePartitions = mutable.ArrayBuffer.empty[ShufflePartitionSpec]
     val rightSidePartitions = mutable.ArrayBuffer.empty[ShufflePartitionSpec]
     var numSkewedLeft = 0
@@ -150,9 +152,29 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
       val rightNoSkewPartitionSpec =
         Seq(CoalescedPartitionSpec(partitionIndex, partitionIndex + 1, rightSize))
 
+      var actualLeftTargetSize = leftTargetSize
+      var actualRightTargetSize = rightTargetSize
+
+      // If both sides are skewed, we need to check if the number of splits is too large
+      if (isLeftSkew && isRightSkew) {
+        // We use the default target size to estimate the number of splits
+        val leftSplits = leftSize / leftTargetSize
+        val rightSplits = rightSize / rightTargetSize
+        if (leftSplits * rightSplits > maxSplits) {
+          logInfo(s"Limiting number of skew join partitions for partition $partitionIndex from " +
+            s"$leftSplits * $rightSplits to approximate limit $maxSplits by increasing target" +
+            s" size.")
+          // If the number of splits is too large, we increase the target size to reduce the
+          // number of splits.
+          val newTargetSplits = math.sqrt(maxSplits.toDouble).toLong
+          actualLeftTargetSize = math.max(leftTargetSize, leftSize / newTargetSplits)
+          actualRightTargetSize = math.max(rightTargetSize, rightSize / newTargetSplits)
+        }
+      }
+
       val leftParts = if (isLeftSkew) {
         val skewSpecs = ShufflePartitionsUtil.createSkewPartitionSpecs(
-          left.mapStats.get.shuffleId, partitionIndex, leftTargetSize)
+          left.mapStats.get.shuffleId, partitionIndex, actualLeftTargetSize)
         if (skewSpecs.isDefined) {
           logDebug(s"Left side partition $partitionIndex " +
             s"(${Utils.bytesToString(leftSize)}) is skewed, " +
@@ -166,7 +188,7 @@ case class OptimizeSkewedJoin(ensureRequirements: EnsureRequirements)
 
       val rightParts = if (isRightSkew) {
         val skewSpecs = ShufflePartitionsUtil.createSkewPartitionSpecs(
-          right.mapStats.get.shuffleId, partitionIndex, rightTargetSize)
+          right.mapStats.get.shuffleId, partitionIndex, actualRightTargetSize)
         if (skewSpecs.isDefined) {
           logDebug(s"Right side partition $partitionIndex " +
             s"(${Utils.bytesToString(rightSize)}) is skewed, " +
