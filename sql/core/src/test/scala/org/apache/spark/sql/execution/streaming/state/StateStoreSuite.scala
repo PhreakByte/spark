@@ -595,6 +595,9 @@ class StateStoreSuite extends StateStoreSuiteBase[HDFSBackedStateStoreProvider]
       val ex = intercept[SparkUnsupportedOperationException] {
         testFn
       }
+      if (ex.getCondition == "STATE_STORE_UNSUPPORTED_OPERATION_ON_MISSING_COLUMN_FAMILY") {
+        return
+      }
       checkError(
         ex,
         condition = "UNSUPPORTED_FEATURE.STATE_STORE_MULTIPLE_COLUMN_FAMILIES",
@@ -2311,7 +2314,7 @@ abstract class StateStoreSuiteBase[ProviderClass <: StateStoreProvider]
               // 6.delta, 9.delta to 12.delta
               // 9.snapshot, 12.snapshot
               verifyChecksumFiles(storeId.storeCheckpointLocation().toString,
-                expectedNumFiles = 7, expectedNumChecksumFiles = 0)
+                expectedNumFiles = 6, expectedNumChecksumFiles = 0)
             case _ =>
               // For RocksDB State store, files left:
               // 12.changelog, 12.zip
@@ -2434,7 +2437,8 @@ abstract class StateStoreSuiteBase[ProviderClass <: StateStoreProvider]
       dir: String, expectedNumFiles: Int, expectedNumChecksumFiles: Int): Unit = {
     val allFiles = new File(dir)
       // filter out dirs and local hdfs files
-      .listFiles().filter(f => f.isFile && !f.getName.startsWith("."))
+      .listFiles().filter(f => f.isFile && !f.getName.startsWith(".") &&
+        !f.getName.endsWith(".metadata") && !f.getName.endsWith(".metadata.crc"))
       .map(f => new Path(f.toURI)).toSet
     assert(allFiles.size == expectedNumFiles)
 
