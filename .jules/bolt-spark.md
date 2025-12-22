@@ -1,0 +1,3 @@
+## 2025-12-22 - Task Explosion in Skew Join Optimization
+**Learning:** When both sides of a join are skewed, `OptimizeSkewedJoin` splits partitions on both sides. The resulting plan executes a Cartesian product of these splits. If the skew is severe and the target partition size is small, this results in a massive number of tasks (e.g., 160 splits on both sides -> 25,600 tasks for a single partition key). This causes driver OOM or massive scheduling overhead.
+**Action:** Detect "double skew" and limit the number of splits by dynamically increasing the target partition size for that specific partition to keep the total task count manageable.

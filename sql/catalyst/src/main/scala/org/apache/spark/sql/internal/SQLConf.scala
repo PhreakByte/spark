@@ -1140,6 +1140,16 @@ object SQLConf {
       .bytesConf(ByteUnit.BYTE)
       .createWithDefaultString("256MB")
 
+  val SKEW_JOIN_MAX_SPLITS_PER_PARTITION =
+    buildConf("spark.sql.adaptive.skewJoin.maxSplitsPerPartition")
+      .doc("The maximum number of tasks that can be generated for a single partition in a " +
+        "skewed join. If the number of tasks (product of left and right splits) exceeds this " +
+        "limit, Spark will increase the target partition size to reduce the number of splits.")
+      .version("4.2.0")
+      .intConf
+      .checkValue(_ > 0, "The max splits per partition must be positive.")
+      .createWithDefault(5000)
+
   val NON_EMPTY_PARTITION_RATIO_FOR_BROADCAST_JOIN =
     buildConf("spark.sql.adaptive.nonEmptyPartitionRatioForBroadcastJoin")
       .internal()
