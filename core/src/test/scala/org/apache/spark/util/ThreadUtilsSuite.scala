@@ -229,4 +229,16 @@ class ThreadUtilsSuite extends SparkFunSuite {
       assert(!t.isAlive)
     }
   }
+
+  test("awaitResult should unwrap SparkFatalException wrapped in ExecutionException") {
+    val future = new java.util.concurrent.CompletableFuture[String]()
+    val oom = new OutOfMemoryError("Test OOM")
+    val fatal = new SparkFatalException(oom)
+    future.completeExceptionally(fatal)
+
+    val thrown = intercept[OutOfMemoryError] {
+      ThreadUtils.awaitResult(future, 10.seconds)
+    }
+    assert(thrown === oom)
+  }
 }

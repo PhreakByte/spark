@@ -370,6 +370,9 @@ private[spark] object ThreadUtils {
     } catch {
       case e: SparkFatalException =>
         throw e.throwable
+      case e: ExecutionException if e.getCause != null &&
+        e.getCause.isInstanceOf[SparkFatalException] =>
+        throw e.getCause.asInstanceOf[SparkFatalException].throwable
       case NonFatal(t)
         if !t.isInstanceOf[TimeoutException] =>
         throw new SparkException("Exception thrown in awaitResult: ", t)
