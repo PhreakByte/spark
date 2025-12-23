@@ -20,6 +20,7 @@ package org.apache.spark.util
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.lang.invoke.{MethodHandleInfo, SerializedLambda}
 import java.lang.reflect.{Field, Modifier}
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable.{Map, Queue, Set, Stack}
 import scala.jdk.CollectionConverters._
@@ -35,6 +36,11 @@ import org.apache.spark.internal.Logging
  * A cleaner that renders closures serializable if they can be done so safely.
  */
 private[spark] object ClosureCleaner extends Logging {
+  private val innerClassesCache = new ConcurrentHashMap[Class[_], List[Class[_]]]()
+  private val outerClassesCache = new ConcurrentHashMap[Class[_], List[Class[_]]]()
+  private val accessedFieldsCache = new ConcurrentHashMap[(Class[_], Boolean),
+    scala.collection.immutable.Map[Class[_], scala.collection.immutable.Set[String]]]()
+
   // Get an ASM class reader for a given class from the JAR that loaded it
   private[util] def getClassReader(cls: Class[_]): ClassReader = {
     // Copy data over, before delegating to ClassReader - else we can run out of open file handles.
@@ -83,24 +89,56 @@ private[spark] object ClosureCleaner extends Logging {
     }
     (Nil, Nil)
   }
+
+  private def getOuterClasses(cls: Class[_]): List[Class[_]] = {
+    val cached = outerClassesCache.get(cls)
+    if (cached != null) {
+      return cached
+    }
+
+    for (f <- cls.getDeclaredFields if f.getName == "$outer") {
+      if (isClosure(f.getType)) {
+        val recurRet = getOuterClasses(f.getType)
+        val result: List[Class[_]] = f.getType :: recurRet
+        outerClassesCache.put(cls, result)
+        return result
+      } else {
+        // Stop at the first $outer that is not a closure
+        val result: List[Class[_]] = f.getType :: Nil
+        outerClassesCache.put(cls, result)
+        return result
+      }
+    }
+    val result: List[Class[_]] = Nil
+    outerClassesCache.put(cls, result)
+    result
+  }
+
   /**
    * Return a list of classes that represent closures enclosed in the given closure object.
    */
-  private def getInnerClosureClasses(obj: AnyRef): List[Class[_]] = {
-    val seen = Set[Class[_]](obj.getClass)
-    val stack = Stack[Class[_]](obj.getClass)
+  private def getInnerClosureClasses(cls: Class[_]): List[Class[_]] = {
+    val cached = innerClassesCache.get(cls)
+    if (cached != null) {
+      return cached
+    }
+
+    val seen = Set[Class[_]](cls)
+    val stack = Stack[Class[_]](cls)
     while (!stack.isEmpty) {
       val cr = getClassReader(stack.pop())
       if (cr != null) {
         val set = Set.empty[Class[_]]
         cr.accept(new InnerClosureFinder(set), 0)
-        for (cls <- set.diff(seen)) {
-          seen += cls
-          stack.push(cls)
+        for (c <- set.diff(seen)) {
+          seen += c
+          stack.push(c)
         }
       }
     }
-    seen.diff(Set(obj.getClass)).toList
+    val result = seen.diff(Set(cls)).toList
+    innerClassesCache.put(cls, result)
+    result
   }
 
   /** Initializes the accessed fields for outer classes and their super classes. */
@@ -206,7 +244,6 @@ private[spark] object ClosureCleaner extends Logging {
     }
 
     // TODO: clean all inner closures first. This requires us to find the inner objects.
-    // TODO: cache outerClasses / innerClasses / accessedFields
 
     if (func == null) {
       return false
@@ -278,7 +315,7 @@ private[spark] object ClosureCleaner extends Logging {
     logDebug(s"+++ Cleaning closure $func (${func.getClass.getName}) +++")
 
     // A list of classes that represents closures enclosed in the given one
-    val innerClasses = getInnerClosureClasses(func)
+    val innerClasses = getInnerClosureClasses(func.getClass)
 
     // A list of enclosing objects and their respective classes, from innermost to outermost
     // An outer object at a given index is of type outer class at the same index
@@ -305,16 +342,29 @@ private[spark] object ClosureCleaner extends Logging {
     // If accessed fields is not populated yet, we assume that
     // the closure we are trying to clean is the starting one
     if (accessedFields.isEmpty) {
-      logDebug(" + populating accessed fields because this is the starting closure")
-      // Initialize accessed fields with the outer classes first
-      // This step is needed to associate the fields to the correct classes later
-      initAccessedFields(accessedFields, outerClasses)
+      val cached = accessedFieldsCache.get((func.getClass, cleanTransitively))
+      if (cached != null) {
+        logDebug(" + populating accessed fields from cache")
+        cached.foreach { case (k, v) =>
+          accessedFields(k) = Set(v.toSeq: _*)
+        }
+      } else {
+        logDebug(" + populating accessed fields because this is the starting closure")
+        // Initialize accessed fields with the outer classes first
+        // This step is needed to associate the fields to the correct classes later
+        val staticOuterClasses = getOuterClasses(func.getClass)
+        initAccessedFields(accessedFields, staticOuterClasses)
 
-      // Populate accessed fields by visiting all fields and methods accessed by this and
-      // all of its inner closures. If transitive cleaning is enabled, this may recursively
-      // visits methods that belong to other classes in search of transitively referenced fields.
-      for (cls <- func.getClass :: innerClasses) {
-        getClassReader(cls).accept(new FieldAccessFinder(accessedFields, cleanTransitively), 0)
+        // Populate accessed fields by visiting all fields and methods accessed by this and
+        // all of its inner closures. If transitive cleaning is enabled, this may recursively
+        // visits methods that belong to other classes in search of transitively referenced fields.
+        for (cls <- func.getClass :: innerClasses) {
+          getClassReader(cls).accept(new FieldAccessFinder(accessedFields, cleanTransitively), 0)
+        }
+        val immutableMap = accessedFields.map { case (k, v) =>
+          (k, v.toSet)
+        }.toMap
+        accessedFieldsCache.put((func.getClass, cleanTransitively), immutableMap)
       }
     }
 
