@@ -21,7 +21,7 @@ import java.util.UUID
 import java.util.concurrent._
 
 import scala.concurrent.{ExecutionContext, Promise}
-import scala.concurrent.duration.NANOSECONDS
+import scala.concurrent.duration.{Duration, NANOSECONDS}
 import scala.util.control.NonFatal
 
 import org.apache.spark.{broadcast, SparkException}
@@ -256,7 +256,13 @@ case class BroadcastExchangeExec(
 
   override protected[sql] def doExecuteBroadcast[T](): broadcast.Broadcast[T] = {
     try {
-      relationFuture.get(timeout, TimeUnit.SECONDS).asInstanceOf[broadcast.Broadcast[T]]
+      val awaitTime = if (timeout >= 0) {
+        val unit = TimeUnit.SECONDS
+        Duration(unit.toNanos(timeout), TimeUnit.NANOSECONDS)
+      } else {
+        Duration.Inf
+      }
+      ThreadUtils.awaitResult(relationFuture, awaitTime).asInstanceOf[broadcast.Broadcast[T]]
     } catch {
       case ex: TimeoutException =>
         logError(log"Could not execute broadcast in ${MDC(TIMEOUT, timeout)} secs.", ex)
