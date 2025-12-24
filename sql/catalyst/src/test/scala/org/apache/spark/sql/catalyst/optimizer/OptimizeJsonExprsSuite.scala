@@ -252,14 +252,24 @@ class OptimizeJsonExprsSuite extends PlanTest with ExpressionEvalHelper {
     val field2 = StructType.fromDDL("b int")
 
     // Skip optimization if `namedStruct` aliases field name.
+    // The previous test expected individual pruning for field "a1" (mapping to "a") and "b".
+    // With coalesced pruning, since both are used, we expect the merged schema (a, b) for both.
+    // This effectively preserves the original expression structure
+    // but with a pruned schema of {a,b}.
+    // Since input schema was {a,b,c,d}, and we use {a,b}, the result is `JsonToStructs` with {a,b}.
+    val mergedSchema = StructType.fromDDL("a int, b int")
+
+    // We expect the result to have `JsonToStructs` with schema "a int, b int".
+    // The first field access uses ordinal 0 (a).
+    // The second field access uses ordinal 1 (b).
     assertEquivalent(
       testRelation2,
       namedStruct(
         "a1", GetStructField(JsonToStructs(schema, options, json, UTC_OPT), 0),
         "b", GetStructField(JsonToStructs(schema, options, json, UTC_OPT), 1)).as("struct"),
       namedStruct(
-        "a1", GetStructField(JsonToStructs(field1, options, json, UTC_OPT), 0),
-        "b", GetStructField(JsonToStructs(field2, options, json, UTC_OPT), 0)).as("struct"))
+        "a1", GetStructField(JsonToStructs(mergedSchema, options, json, UTC_OPT), 0),
+        "b", GetStructField(JsonToStructs(mergedSchema, options, json, UTC_OPT), 1)).as("struct"))
 
     assertEquivalent(
       testRelation2,

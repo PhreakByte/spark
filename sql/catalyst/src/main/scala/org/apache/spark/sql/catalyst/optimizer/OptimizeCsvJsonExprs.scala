@@ -17,11 +17,12 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import scala.collection.mutable
+
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE,
-  JSON_TO_STRUCT}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT}
 import org.apache.spark.sql.types.{ArrayType, StructType}
 
 /**
@@ -43,9 +44,10 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
     _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT), ruleId) {
     case p =>
       val optimized = if (conf.jsonExpressionOptimization) {
-        p.transformExpressionsWithPruning(
+        val preOptimized = p.transformExpressionsWithPruning(
           _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT)
           )(jsonOptimization)
+        pruneJsonStructs(preOptimized)
       } else {
         p
       }
@@ -101,22 +103,80 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
       // so `JsonToStructs` might throw error in runtime. Thus we cannot optimize
       // this case similarly.
       child
+  }
 
-    case g @ GetStructField(j @ JsonToStructs(schema: StructType, _, _, _), ordinal, _)
-        if schema.length > 1 && j.options.isEmpty =>
-        // Options here should be empty because the optimization should not be enabled
-        // for some options. For example, when the parse mode is failfast it should not
-        // optimize, and should force to parse the whole input JSON with failing fast for
-        // an invalid input.
-        // To be more conservative, it does not optimize when any option is set for now.
-      val prunedSchema = StructType(Array(schema(ordinal)))
-      g.copy(child = j.copy(schema = prunedSchema), ordinal = 0)
+  // Key to group same `JsonToStructs` together.
+  private case class JsonStructsKey(
+    child: Expression,
+    schema: StructType,
+    options: Map[String, String],
+    timeZoneId: Option[String],
+    variantAllowDuplicateKeys: Boolean)
 
-    case g @ GetArrayStructFields(j @ JsonToStructs(ArrayType(schema: StructType, _),
-        _, _, _), _, ordinal, _, _) if schema.length > 1 && j.options.isEmpty =>
-      // Obtain the pruned schema by picking the `ordinal` field of the struct.
-      val prunedSchema = ArrayType(StructType(Array(schema(ordinal))), g.containsNull)
-      g.copy(child = j.copy(schema = prunedSchema), ordinal = 0, numFields = 1)
+  private def pruneJsonStructs(plan: LogicalPlan): LogicalPlan = {
+    // Collect all GetStructField(JsonToStructs) and GetArrayStructFields(JsonToStructs)
+    val usageMap = mutable.Map.empty[JsonStructsKey, mutable.BitSet]
+
+    // Traverse the plan to collect usage
+    plan.transformExpressions {
+      case g @ GetStructField(j @ JsonToStructs(schema: StructType, _, _, _), ordinal, _)
+          if schema.length > 1 && j.options.isEmpty =>
+        val key = JsonStructsKey(
+          j.child, schema, j.options, j.timeZoneId, j.variantAllowDuplicateKeys)
+        usageMap.getOrElseUpdate(key, new mutable.BitSet()).add(ordinal)
+        g
+
+      case g @ GetArrayStructFields(j @ JsonToStructs(ArrayType(schema: StructType, _),
+          _, _, _), _, ordinal, _, _) if schema.length > 1 && j.options.isEmpty =>
+        // Here schema is the element schema of the ArrayType
+        val key = JsonStructsKey(
+          j.child, schema, j.options, j.timeZoneId, j.variantAllowDuplicateKeys)
+        usageMap.getOrElseUpdate(key, new mutable.BitSet()).add(ordinal)
+        g
+    }
+
+    if (usageMap.isEmpty) return plan
+
+    // Construct replacements
+    // Key -> (OriginalSchema, PrunedSchema, Map[OldOrdinal, NewOrdinal])
+    val replacements = usageMap.map { case (key, usedOrdinals) =>
+      val originalSchema = key.schema
+      val sortedOrdinals = usedOrdinals.toSeq.sorted
+      val newFields = sortedOrdinals.map(originalSchema(_))
+      val prunedSchema = StructType(newFields.toArray)
+      val ordinalMap = sortedOrdinals.zipWithIndex.toMap
+      key -> (originalSchema, prunedSchema, ordinalMap)
+    }.toMap
+
+    // Rewrite expressions
+    plan.transformExpressions {
+      case g @ GetStructField(j @ JsonToStructs(schema: StructType, _, _, _), ordinal, _)
+          if schema.length > 1 && j.options.isEmpty =>
+        val key = JsonStructsKey(
+          j.child, schema, j.options, j.timeZoneId, j.variantAllowDuplicateKeys)
+        replacements.get(key) match {
+          case Some((_, prunedSchema, ordinalMap)) =>
+            // Create a new JsonToStructs with pruned schema
+            val newJ = j.copy(schema = prunedSchema)
+            val newOrdinal = ordinalMap(ordinal)
+            g.copy(child = newJ, ordinal = newOrdinal)
+          case None => g
+        }
+
+      case g @ GetArrayStructFields(j @ JsonToStructs(ArrayType(schema: StructType, containsNull),
+          _, _, _), field, ordinal, numFields, _) if schema.length > 1 && j.options.isEmpty =>
+        val key = JsonStructsKey(
+          j.child, schema, j.options, j.timeZoneId, j.variantAllowDuplicateKeys)
+        replacements.get(key) match {
+          case Some((_, prunedSchema, ordinalMap)) =>
+            val newSchema = ArrayType(prunedSchema, containsNull)
+            val newJ = j.copy(schema = newSchema)
+            val newOrdinal = ordinalMap(ordinal)
+            // numFields should be the number of fields in the pruned schema
+            g.copy(child = newJ, ordinal = newOrdinal, numFields = prunedSchema.length)
+          case None => g
+        }
+    }
   }
 
   private val csvOptimization: PartialFunction[Expression, Expression] = {
