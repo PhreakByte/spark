@@ -258,8 +258,8 @@ class OptimizeJsonExprsSuite extends PlanTest with ExpressionEvalHelper {
         "a1", GetStructField(JsonToStructs(schema, options, json, UTC_OPT), 0),
         "b", GetStructField(JsonToStructs(schema, options, json, UTC_OPT), 1)).as("struct"),
       namedStruct(
-        "a1", GetStructField(JsonToStructs(field1, options, json, UTC_OPT), 0),
-        "b", GetStructField(JsonToStructs(field2, options, json, UTC_OPT), 0)).as("struct"))
+        "a1", GetStructField(JsonToStructs(prunedSchema1, options, json, UTC_OPT), 0),
+        "b", GetStructField(JsonToStructs(prunedSchema1, options, json, UTC_OPT), 1)).as("struct"))
 
     assertEquivalent(
       testRelation2,
