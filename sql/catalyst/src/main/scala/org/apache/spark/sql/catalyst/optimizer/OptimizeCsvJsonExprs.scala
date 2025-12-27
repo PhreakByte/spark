@@ -17,11 +17,12 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import scala.collection.mutable
+
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE,
-  JSON_TO_STRUCT}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT}
 import org.apache.spark.sql.types.{ArrayType, StructType}
 
 /**
@@ -42,20 +43,109 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformWithPruning(
     _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT), ruleId) {
     case p =>
+      // First run the existing optimizations, but without the eager pruning.
       val optimized = if (conf.jsonExpressionOptimization) {
         p.transformExpressionsWithPruning(
           _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT)
-          )(jsonOptimization)
+        )(jsonOptimization)
       } else {
         p
       }
 
-      if (conf.csvExpressionOptimization) {
-        optimized.transformExpressionsWithPruning(
-          _.containsAnyPattern(EXTRACT_VALUE))(csvOptimization)
+      // Then apply coalesced pruning to the entire plan node.
+      val coalesced = if (conf.jsonExpressionOptimization) {
+        coalesceJsonPruning(optimized)
       } else {
         optimized
       }
+
+      if (conf.csvExpressionOptimization) {
+        coalesced.transformExpressionsWithPruning(
+          _.containsAnyPattern(EXTRACT_VALUE))(csvOptimization)
+      } else {
+        coalesced
+      }
+  }
+
+  /**
+   * This method identifies multiple `GetStructField` or `GetArrayStructFields` on the same
+   * `JsonToStructs` expression and prunes the schema to the union of all accessed fields.
+   * This allows Common Subexpression Elimination (CSE) to merge the `JsonToStructs` expressions,
+   * significantly reducing parsing overhead when multiple fields are accessed.
+   */
+  private def coalesceJsonPruning(plan: LogicalPlan): LogicalPlan = {
+    // 1. Collect all interesting expressions (GetStructField/GetArrayStructFields on JsonToStructs)
+    val usages = mutable.ArrayBuffer[(Expression, JsonToStructs, Int)]()
+
+    // We only traverse the top-level expressions of the plan node.
+    // Deeply nested expressions will be handled when the rule visits their parent nodes,
+    // assuming they are part of a Plan node.
+    // However, expressions can be nested within expressions (e.g. `UPPER(from_json(...).a)`).
+    // So we need to traverse the expression trees.
+    plan.expressions.foreach { expr =>
+      expr.foreach {
+        case g @ GetStructField(j: JsonToStructs, ordinal, _) =>
+          // j.schema needs to be cast to StructType to access length
+          val schema = j.schema.asInstanceOf[StructType]
+          if (j.options.isEmpty && schema.length > 1) {
+            usages += ((g, j, ordinal))
+          }
+        case g @ GetArrayStructFields(j: JsonToStructs, _, ordinal, _, _) =>
+          // j.schema is ArrayType(StructType)
+          val schema = j.schema.asInstanceOf[ArrayType].elementType.asInstanceOf[StructType]
+          if (j.options.isEmpty && schema.length > 1) {
+            usages += ((g, j, ordinal))
+          }
+        case _ =>
+      }
+    }
+
+    if (usages.isEmpty) return plan
+
+    // 2. Group by the `JsonToStructs` expression itself.
+    // Identical `JsonToStructs` (same child, same options, same schema) will be grouped together.
+    val grouped = usages.groupBy(_._2)
+
+    val replacements = mutable.Map.empty[Expression, Expression]
+
+    grouped.foreach { case (jsonExpr, usageList) =>
+      val usedOrdinals = usageList.map(_._3).distinct.sorted
+      val originalSchema = jsonExpr.schema match {
+        case s: StructType => s
+        case ArrayType(s: StructType, _) => s
+      }
+
+      // 3. If we use fewer fields than the original schema, prune it.
+      if (usedOrdinals.length < originalSchema.length) {
+        val prunedFields = usedOrdinals.map(originalSchema(_))
+        val prunedStructSchema = StructType(prunedFields.toSeq)
+
+        val newSchema = jsonExpr.schema match {
+          case _: StructType => prunedStructSchema
+          case ArrayType(_, containsNull) => ArrayType(prunedStructSchema, containsNull)
+        }
+
+        val newJsonExpr = jsonExpr.copy(schema = newSchema)
+        val ordinalMap = usedOrdinals.zipWithIndex.toMap
+
+        usageList.foreach { case (expr, _, oldOrdinal) =>
+          val newOrdinal = ordinalMap(oldOrdinal)
+          val newExpr = expr match {
+            case g: GetStructField => g.copy(child = newJsonExpr, ordinal = newOrdinal)
+            case g: GetArrayStructFields =>
+              g.copy(child = newJsonExpr, ordinal = newOrdinal,
+                numFields = prunedStructSchema.length)
+          }
+          replacements += (expr -> newExpr)
+        }
+      }
+    }
+
+    if (replacements.isEmpty) {
+      plan
+    } else {
+      plan.transformExpressions { case e => replacements.getOrElse(e, e) }
+    }
   }
 
   private val jsonOptimization: PartialFunction[Expression, Expression] = {
@@ -102,21 +192,7 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
       // this case similarly.
       child
 
-    case g @ GetStructField(j @ JsonToStructs(schema: StructType, _, _, _), ordinal, _)
-        if schema.length > 1 && j.options.isEmpty =>
-        // Options here should be empty because the optimization should not be enabled
-        // for some options. For example, when the parse mode is failfast it should not
-        // optimize, and should force to parse the whole input JSON with failing fast for
-        // an invalid input.
-        // To be more conservative, it does not optimize when any option is set for now.
-      val prunedSchema = StructType(Array(schema(ordinal)))
-      g.copy(child = j.copy(schema = prunedSchema), ordinal = 0)
-
-    case g @ GetArrayStructFields(j @ JsonToStructs(ArrayType(schema: StructType, _),
-        _, _, _), _, ordinal, _, _) if schema.length > 1 && j.options.isEmpty =>
-      // Obtain the pruned schema by picking the `ordinal` field of the struct.
-      val prunedSchema = ArrayType(StructType(Array(schema(ordinal))), g.containsNull)
-      g.copy(child = j.copy(schema = prunedSchema), ordinal = 0, numFields = 1)
+    // Eager pruning cases removed to allow coalescing in coalesceJsonPruning
   }
 
   private val csvOptimization: PartialFunction[Expression, Expression] = {
