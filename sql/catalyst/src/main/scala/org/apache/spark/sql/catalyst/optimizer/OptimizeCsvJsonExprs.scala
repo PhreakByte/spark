@@ -17,12 +17,13 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import scala.collection.mutable
+
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE,
-  JSON_TO_STRUCT}
-import org.apache.spark.sql.types.{ArrayType, StructType}
+import org.apache.spark.sql.catalyst.trees.TreePattern.{CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT}
+import org.apache.spark.sql.types.{ArrayType, DataType, StructType}
 
 /**
  * Simplify redundant csv/json related expressions.
@@ -42,12 +43,23 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = plan.transformWithPruning(
     _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT), ruleId) {
     case p =>
-      val optimized = if (conf.jsonExpressionOptimization) {
-        p.transformExpressionsWithPruning(
-          _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT)
-          )(jsonOptimization)
+      // 1. Coalesce JsonToStructs expressions to share the same parser
+      val coalesced = if (conf.jsonExpressionOptimization) {
+        coalesceJsonToStructs(p)
       } else {
         p
+      }
+
+      val optimized = if (conf.jsonExpressionOptimization) {
+        // 2. Apply existing pruning optimizations, but skip if the expression is used multiple
+        // times (to preserve the sharing achieved by coalescing or existing in the query)
+        val usageCounts = collectJsonToStructsCounts(coalesced)
+
+        coalesced.transformExpressionsWithPruning(
+          _.containsAnyPattern(CREATE_NAMED_STRUCT, EXTRACT_VALUE, JSON_TO_STRUCT)
+        )(e => jsonOptimizationWithUsageCheck(e, usageCounts))
+      } else {
+        coalesced
       }
 
       if (conf.csvExpressionOptimization) {
@@ -56,6 +68,70 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
       } else {
         optimized
       }
+  }
+
+  private def collectJsonToStructsCounts(p: LogicalPlan): Map[Expression, Int] = {
+    val counts = mutable.Map[Expression, Int]()
+    p.expressions.foreach { expr =>
+      expr.foreach {
+        case j: JsonToStructs =>
+          val key = j.canonicalized
+          counts(key) = counts.getOrElse(key, 0) + 1
+        case _ =>
+      }
+    }
+    counts.toMap
+  }
+
+  private def jsonOptimizationWithUsageCheck(
+      e: Expression, counts: Map[Expression, Int]): Expression = {
+    e match {
+      case g @ GetStructField(j: JsonToStructs, _, _)
+        if counts.getOrElse(j.canonicalized, 0) > 1 => g
+      case g @ GetArrayStructFields(j: JsonToStructs, _, _, _, _)
+        if counts.getOrElse(j.canonicalized, 0) > 1 =>
+        g
+      case _ => jsonOptimization.applyOrElse(e, (x: Expression) => x)
+    }
+  }
+
+  private def coalesceJsonToStructs(p: LogicalPlan): LogicalPlan = {
+    val needed = mutable.Map[
+      (Expression, Map[String, String], Option[String], DataType), mutable.BitSet]()
+
+    p.expressions.foreach(_.foreach {
+      case GetStructField(
+          j @ JsonToStructs(schema: StructType, options, child, tz), ordinal, _) =>
+        val key = (child.canonicalized, options, tz, schema)
+        needed.getOrElseUpdate(key, new mutable.BitSet()).add(ordinal)
+      case _ =>
+    })
+
+    if (needed.isEmpty || needed.values.forall(_.size <= 1)) return p
+
+    val newSchemas = needed.map { case (key, ordinals) =>
+      val (childCan, options, tz, schemaStr) = key
+      val schema = schemaStr.asInstanceOf[StructType]
+      val sortedOrdinals = ordinals.toSeq.sorted
+      val newFields = sortedOrdinals.map(schema.apply)
+      val newSchema = StructType(newFields.toArray)
+      val ordinalMap = sortedOrdinals.zipWithIndex.toMap
+      key -> (newSchema, ordinalMap)
+    }.toMap
+
+    p.transformExpressionsUp {
+      case g @ GetStructField(
+          j @ JsonToStructs(schema: StructType, options, child, tz), ordinal, _) =>
+        val key = (child.canonicalized, options, tz, schema)
+        newSchemas.get(key) match {
+          case Some((newSchema, map)) if map.contains(ordinal) =>
+            val newOrdinal = map(ordinal)
+            val newJ = j.copy(schema = newSchema)
+            g.copy(child = newJ, ordinal = newOrdinal)
+          case _ => g
+        }
+      case other => other
+    }
   }
 
   private val jsonOptimization: PartialFunction[Expression, Expression] = {
@@ -80,7 +156,8 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
       // If we create struct from various fields of the same `JsonToStructs` and we don't
       // alias field names and there is no duplicated field in the struct.
       if (sameFieldName && !duplicateFields) {
-        val fromJson = jsonToStructs.head.asInstanceOf[JsonToStructs].copy(schema = c.dataType)
+        val fromJson = jsonToStructs.head.asInstanceOf[JsonToStructs]
+          .copy(schema = c.dataType)
         val nullFields = c.children.grouped(2).flatMap {
           case Seq(name, value) => Seq(name, Literal(null, value.dataType))
         }.toSeq
@@ -121,10 +198,11 @@ object OptimizeCsvJsonExprs extends Rule[LogicalPlan] {
 
   private val csvOptimization: PartialFunction[Expression, Expression] = {
     case g @ GetStructField(c @ CsvToStructs(schema: StructType, _, _, _, None), ordinal, _)
-        if schema.length > 1 && c.options.isEmpty && schema(ordinal).name != nameOfCorruptRecord =>
-        // When the parse mode is permissive, and corrupt column is not selected, we can prune here
-        // from `GetStructField`. To be more conservative, it does not optimize when any option
-        // is set.
+        if schema.length > 1 && c.options.isEmpty &&
+          schema(ordinal).name != nameOfCorruptRecord =>
+        // When the parse mode is permissive, and corrupt column is not selected, we can prune
+        // here from `GetStructField`. To be more conservative, it does not optimize when any
+        // option is set.
       val prunedSchema = StructType(Array(schema(ordinal)))
       g.copy(child = c.copy(requiredSchema = Some(prunedSchema)), ordinal = 0)
   }
